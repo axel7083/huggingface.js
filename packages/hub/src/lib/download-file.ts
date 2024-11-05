@@ -3,6 +3,8 @@ import { createApiError } from "../error";
 import type { CredentialsParams, RepoDesignation } from "../types/public";
 import { checkCredentials } from "../utils/checkCredentials";
 import { toRepoId } from "../utils/toRepoId";
+import { getHFHubCache, getRepoFolderName } from "./cache-management";
+import { join } from "node:path";
 
 /**
  * @returns null when the file doesn't exist
@@ -28,17 +30,22 @@ export async function downloadFile(
 		 */
 		range?: [number, number];
 		hubUrl?: string;
+		cacheDir?: string,
 		/**
 		 * Custom fetch function to use instead of the default one, for example to use a proxy or edit headers.
 		 */
 		fetch?: typeof fetch;
 	} & Partial<CredentialsParams>
 ): Promise<Response | null> {
+	// get revision provided or default to main
+	const revision = params.revision ?? "main";
+	const cacheDir = params.cacheDir ?? getHFHubCache();
+
 	const accessToken = checkCredentials(params);
 	const repoId = toRepoId(params.repo);
 	const url = `${params.hubUrl ?? HUB_URL}/${repoId.type === "model" ? "" : `${repoId.type}s/`}${repoId.name}/${
 		params.raw ? "raw" : "resolve"
-	}/${encodeURIComponent(params.revision ?? "main")}/${params.path}`;
+	}/${encodeURIComponent(revision)}/${params.path}`;
 
 	const resp = await (params.fetch ?? fetch)(url, {
 		headers: {
@@ -54,6 +61,9 @@ export async function downloadFile(
 				: {}),
 		},
 	});
+
+	// get storage folder
+	const storageFolder = join(cacheDir, getRepoFolderName(repoId));
 
 	if (resp.status === 404 && resp.headers.get("X-Error-Code") === "EntryNotFound") {
 		return null;
