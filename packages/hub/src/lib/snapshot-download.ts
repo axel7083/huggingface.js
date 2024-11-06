@@ -1,11 +1,15 @@
 import type { RepoDesignation } from "../types/public";
 import { listFiles } from "./list-files";
 import { downloadFile } from "./download-file";
-import { getHFHubCache } from "./cache-management";
+import { getHFHubCache, getRepoFolderName } from "./cache-management";
 import { spaceInfo } from "./space-info";
 import { datasetInfo } from "./dataset-info";
 import { modelInfo } from "./model-info";
 import { toRepoId } from "../utils/toRepoId";
+import { join, dirname } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+
+export const DEFAULT_REVISION = "main";
 
 export async function snapshotDownload(
 	params: {
@@ -23,13 +27,20 @@ export async function snapshotDownload(
 		 */
 		fetch?: typeof fetch;
 	},
-): Promise<void> {
+): Promise<string> {
 
 	let cacheDir: string;
 	if(params.cacheDir) {
 		cacheDir = params.cacheDir;
 	} else {
 		cacheDir = getHFHubCache();
+	}
+
+	let revision: string;
+	if(params.revision) {
+		revision = params.revision;
+	} else {
+		revision = DEFAULT_REVISION;
 	}
 
 	const repoId = toRepoId(params.repo);
@@ -41,25 +52,40 @@ export async function snapshotDownload(
 			repoInfo = await spaceInfo({
 				name: repoId.name,
 				additionalFields: ['sha'],
-				revision: params.revision,
+				revision: revision,
 			});
 			break;
 		case "dataset":
 			repoInfo = await datasetInfo({
 				name: repoId.name,
 				additionalFields: ['sha'],
-				revision: params.revision,
+				revision: revision,
 			});
 			break;
 		case "model":
 			repoInfo = await modelInfo({
 				name: repoId.name,
 				additionalFields: ['sha'],
-				revision: params.revision,
+				revision: revision,
 			});
 			break;
 		default:
 			throw new Error(`invalid repository type ${repoId.type}`);
+	}
+
+	const commitHash: string = repoInfo.sha;
+
+	// get storage folder
+	const storageFolder = join(cacheDir, getRepoFolderName(repoId));
+	const snapshotFolder = join(storageFolder, "snapshots", commitHash)
+
+	// if passed revision is not identical to commit_hash
+	// then revision has to be a branch name or tag name.
+	// In that case store a ref.
+	if(revision !== commitHash) {
+	  const refPath = join(storageFolder, "refs", revision);
+		await mkdir(dirname(refPath), { recursive: true });
+		await writeFile(refPath, commitHash);
 	}
 
 	const cursor = listFiles({
@@ -80,4 +106,6 @@ export async function snapshotDownload(
 			cacheDir: cacheDir,
 		});
 	}
+
+	return snapshotFolder;
 }
