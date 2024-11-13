@@ -4,6 +4,10 @@ import type { CredentialsParams, RepoDesignation } from "../types/public";
 import { checkCredentials } from "../utils/checkCredentials";
 import { toRepoId } from "../utils/toRepoId";
 
+const HUGGINGFACE_HEADER_X_REPO_COMMIT = "X-Repo-Commit"
+const HUGGINGFACE_HEADER_X_LINKED_ETAG = "X-Linked-Etag"
+const HUGGINGFACE_HEADER_X_LINKED_SIZE = "X-Linked-Size"
+
 export interface FileDownloadInfoOutput {
 	size: number;
 	etag: string;
@@ -11,6 +15,7 @@ export interface FileDownloadInfoOutput {
 	 * In case of LFS file, link to download directly from cloud provider
 	 */
 	downloadLink: string | null;
+	commit_hash: string | null;
 }
 /**
  * @returns null when the file doesn't exist
@@ -48,37 +53,38 @@ export async function fileDownloadInfo(
 		(params.noContentDisposition ? "?noContentDisposition=1" : "");
 
 	const resp = await (params.fetch ?? fetch)(url, {
-		method: "GET",
+		method: "HEAD",
 		headers: {
 			...(params.credentials && {
 				Authorization: `Bearer ${accessToken}`,
 			}),
-			Range: "bytes=0-0",
 		},
+		redirect: 'manual',
 	});
 
 	if (resp.status === 404 && resp.headers.get("X-Error-Code") === "EntryNotFound") {
 		return null;
 	}
 
-	if (!resp.ok) {
+	// redirect is okay
+	if (!resp.ok && !resp.headers.get('Location')) {
 		throw await createApiError(resp);
 	}
 
-	const etag = resp.headers.get("ETag");
-
+	const etag = resp.headers.get(HUGGINGFACE_HEADER_X_LINKED_ETAG) ?? resp.headers.get("ETag");
 	if (!etag) {
 		throw new InvalidApiResponseFormatError("Expected ETag");
 	}
 
-	const contentRangeHeader = resp.headers.get("content-range");
+	// Content-Length vs Content-Range
+	// See https://stackoverflow.com/questions/716680/difference-between-content-range-and-range-headers
+	const contentSize = resp.headers.get(HUGGINGFACE_HEADER_X_LINKED_SIZE) ?? resp.headers.get("Content-Length")
 
-	if (!contentRangeHeader) {
+	if (!contentSize) {
 		throw new InvalidApiResponseFormatError("Expected size information");
 	}
 
-	const [, parsedSize] = contentRangeHeader.split("/");
-	const size = parseInt(parsedSize);
+	const size = parseInt(contentSize);
 
 	if (isNaN(size)) {
 		throw new InvalidApiResponseFormatError("Invalid file size received");
@@ -88,5 +94,6 @@ export async function fileDownloadInfo(
 		etag,
 		size,
 		downloadLink: new URL(resp.url).hostname !== new URL(hubUrl).hostname ? resp.url : null,
+		commit_hash: resp.headers.get(HUGGINGFACE_HEADER_X_REPO_COMMIT),
 	};
 }

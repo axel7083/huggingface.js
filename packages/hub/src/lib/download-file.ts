@@ -5,9 +5,8 @@ import { checkCredentials } from "../utils/checkCredentials";
 import { toRepoId } from "../utils/toRepoId";
 import { getHFHubCache, getRepoFolderName } from "./cache-management";
 import { dirname, join } from "node:path";
-import { lstat, mkdir, stat } from "node:fs/promises";
 import { fileDownloadInfo, type FileDownloadInfoOutput } from "./file-download-info";
-import { writeFile, rename, symlink } from "node:fs/promises";
+import { writeFile, rename, symlink, lstat, mkdir, stat } from "node:fs/promises";
 
 export const REGEX_COMMIT_HASH: RegExp = new RegExp("^[0-9a-f]{40}$");
 
@@ -16,6 +15,11 @@ function getFilePointer(storageFolder: string, revision: string, relativeFilenam
 	return join(snapshotPath, revision, relativeFilename);
 }
 
+/**
+ * handy method to check if a file exists, or the pointer of a symlinks exists
+ * @param path
+ * @param followSymlinks
+ */
 async function exists(path: string, followSymlinks?: boolean): Promise<boolean> {
 	try {
 		if(followSymlinks) {
@@ -29,6 +33,10 @@ async function exists(path: string, followSymlinks?: boolean): Promise<boolean> 
 	}
 }
 
+/**
+ * Download a given file if it's not already present in the local cache.
+ * @param params
+ */
 export async function downloadFileToCacheDir(
 	params: {
 		repo: RepoDesignation;
@@ -45,10 +53,6 @@ export async function downloadFileToCacheDir(
 		 * @default "main"
 		 */
 		revision?: string;
-		/**
-		 * Fetch only a specific part of the file
-		 */
-		range?: [number, number];
 		hubUrl?: string;
 		cacheDir?: string,
 		/**
@@ -78,15 +82,6 @@ export async function downloadFileToCacheDir(
 	});
 	if(!downloadInfo) throw new Error(`cannot get download info for ${params.path}`);
 
-	let downloadLink: string;
-	if(downloadInfo.downloadLink && !params.raw) {
-		downloadLink = downloadInfo.downloadLink;
-	} else {
-		downloadLink = `${params.hubUrl ?? HUB_URL}/${repoId.type === "model" ? "" : `${repoId.type}s/`}${repoId.name}/${
-			params.raw ? "raw" : "resolve"
-		}/${encodeURIComponent(revision)}/${params.path}`;
-	}
-
 	// weird reasons the etag is under the format "...." with quotes
 	const etag = downloadInfo.etag.replaceAll("\"", "");
 
@@ -96,41 +91,24 @@ export async function downloadFileToCacheDir(
 	await mkdir(dirname(blobPath), { recursive: true });
 	await mkdir(dirname(pointerPath), { recursive: true });
 
-	// TODO: _cache_commit_hash_for_specific_revision
-
 	const incomplete = `${blobPath}.incomplete`;
-	await downloadToFile({
+	console.debug(`Downloading ${params.path} to ${incomplete}`);
+
+	const response: Response | null = await downloadFile({
 		...params,
-		url: downloadLink,
-		destinationPath: incomplete,
+		revision: revision,
 	});
 
-	await rename(incomplete, blobPath);
-	await symlink(blobPath, pointerPath);
-	return blobPath;
-}
-
-export async function downloadToFile(params: {
-	url: string,
-	destinationPath: string,
-} & Partial<CredentialsParams>): Promise<void> {
-	const accessToken = checkCredentials(params);
-	const resp = await fetch(params.url, {
-		headers: (accessToken
-			? {
-				Authorization: `Bearer ${accessToken}`,
-			}
-			: {}),
-	});
-
-	if (resp.status === 404 && resp.headers.get("X-Error-Code") === "EntryNotFound") {
-		throw await createApiError(resp);
-	}
-
-	if (!resp.ok || !resp.body) throw new Error('invalid response')
+	if (!response || !response.ok || !response.body) throw new Error('invalid response');
 
 	// @ts-expect-error resp.body is a Stream, but Stream in internal to node
-	return writeFile(params.destinationPath, resp.body);
+	await writeFile(incomplete, response.body);
+
+	// rename .incomplete file to expect blob
+	await rename(incomplete, blobPath);
+	// create symlinks in snapshot folder to blob object
+	await symlink(blobPath, pointerPath);
+	return blobPath;
 }
 
 /**
@@ -157,23 +135,17 @@ export async function downloadFile(
 		 */
 		range?: [number, number];
 		hubUrl?: string;
-		cacheDir?: string,
 		/**
 		 * Custom fetch function to use instead of the default one, for example to use a proxy or edit headers.
 		 */
 		fetch?: typeof fetch;
 	} & Partial<CredentialsParams>
 ): Promise<Response | null> {
-
-	// get revision provided or default to main
-	const revision = params.revision ?? "main";
-	const cacheDir = params.cacheDir ?? getHFHubCache();
-
 	const accessToken = checkCredentials(params);
 	const repoId = toRepoId(params.repo);
 	const url = `${params.hubUrl ?? HUB_URL}/${repoId.type === "model" ? "" : `${repoId.type}s/`}${repoId.name}/${
 		params.raw ? "raw" : "resolve"
-	}/${encodeURIComponent(revision)}/${params.path}`;
+	}/${encodeURIComponent(params.revision ?? "main")}/${params.path}`;
 
 	const resp = await (params.fetch ?? fetch)(url, {
 		headers: {
@@ -189,9 +161,6 @@ export async function downloadFile(
 				: {}),
 		},
 	});
-
-	// get storage folder
-	const storageFolder = join(cacheDir, getRepoFolderName(repoId));
 
 	if (resp.status === 404 && resp.headers.get("X-Error-Code") === "EntryNotFound") {
 		return null;
