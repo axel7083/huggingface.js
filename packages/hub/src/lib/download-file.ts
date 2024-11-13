@@ -6,7 +6,8 @@ import { toRepoId } from "../utils/toRepoId";
 import { getHFHubCache, getRepoFolderName } from "./cache-management";
 import { dirname, join } from "node:path";
 import { lstat, mkdir, stat } from "node:fs/promises";
-import { fileDownloadInfo, FileDownloadInfoOutput } from "./file-download-info";
+import { fileDownloadInfo, type FileDownloadInfoOutput } from "./file-download-info";
+import { writeFile, rename, symlink } from "node:fs/promises";
 
 export const REGEX_COMMIT_HASH: RegExp = new RegExp("^[0-9a-f]{40}$");
 
@@ -77,13 +78,59 @@ export async function downloadFileToCacheDir(
 	});
 	if(!downloadInfo) throw new Error(`cannot get download info for ${params.path}`);
 
-	const blobPath = join(storageFolder, "blobs", downloadInfo.etag);
+	let downloadLink: string;
+	if(downloadInfo.downloadLink && !params.raw) {
+		downloadLink = downloadInfo.downloadLink;
+	} else {
+		downloadLink = `${params.hubUrl ?? HUB_URL}/${repoId.type === "model" ? "" : `${repoId.type}s/`}${repoId.name}/${
+			params.raw ? "raw" : "resolve"
+		}/${encodeURIComponent(revision)}/${params.path}`;
+	}
+
+	// weird reasons the etag is under the format "...." with quotes
+	const etag = downloadInfo.etag.replaceAll("\"", "");
+
+	const blobPath = join(storageFolder, "blobs", etag);
 
 	// mkdir blob and pointer path parent directory
 	await mkdir(dirname(blobPath), { recursive: true });
 	await mkdir(dirname(pointerPath), { recursive: true });
 
 	// TODO: _cache_commit_hash_for_specific_revision
+
+	const incomplete = `${blobPath}.incomplete`;
+	await downloadToFile({
+		...params,
+		url: downloadLink,
+		destinationPath: incomplete,
+	});
+
+	await rename(incomplete, blobPath);
+	await symlink(blobPath, pointerPath);
+	return blobPath;
+}
+
+export async function downloadToFile(params: {
+	url: string,
+	destinationPath: string,
+} & Partial<CredentialsParams>): Promise<void> {
+	const accessToken = checkCredentials(params);
+	const resp = await fetch(params.url, {
+		headers: (accessToken
+			? {
+				Authorization: `Bearer ${accessToken}`,
+			}
+			: {}),
+	});
+
+	if (resp.status === 404 && resp.headers.get("X-Error-Code") === "EntryNotFound") {
+		throw await createApiError(resp);
+	}
+
+	if (!resp.ok || !resp.body) throw new Error('invalid response')
+
+	// @ts-expect-error resp.body is a Stream, but Stream in internal to node
+	return writeFile(params.destinationPath, resp.body);
 }
 
 /**

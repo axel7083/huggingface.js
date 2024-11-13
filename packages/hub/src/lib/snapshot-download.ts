@@ -1,6 +1,6 @@
 import type { RepoDesignation } from "../types/public";
 import { listFiles } from "./list-files";
-import { downloadFile } from "./download-file";
+import { downloadFileToCacheDir } from "./download-file";
 import { getHFHubCache, getRepoFolderName } from "./cache-management";
 import { spaceInfo } from "./space-info";
 import { datasetInfo } from "./dataset-info";
@@ -97,15 +97,31 @@ export async function snapshotDownload(
 	});
 
 	for await (const entry of cursor) {
-		await downloadFile({
-			repo: params.repo,
-			path: entry.path,
-			revision: params.revision,
-			hubUrl: params.hubUrl,
-			fetch: params.fetch,
-			cacheDir: cacheDir,
-		});
+		switch (entry.type) {
+			case "file":
+				await downloadFileToCacheDir({
+					repo: params.repo,
+					path: entry.path,
+					revision: commitHash,
+					hubUrl: params.hubUrl,
+					fetch: params.fetch,
+					cacheDir: cacheDir,
+				});
+				break;
+			case "directory":
+				await mkdir(join(snapshotFolder, entry.path), { recursive: true });
+				break;
+			default:
+				throw new Error(`unknown entry type: ${entry.type}`);
+		}
 	}
 
 	return snapshotFolder;
 }
+
+snapshotDownload({
+	repo: {
+		name: 'OuteAI/OuteTTS-0.1-350M',
+		type: 'model',
+	}
+});
